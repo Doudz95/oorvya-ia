@@ -282,14 +282,28 @@ app.post('/askIA', async (req, res) => {
       },
     });
 
-    const history = (conversationHistory || []).slice(-10).map((m) => ({
-      role: m.role === 'user' ? 'user' : 'model',
-      parts: [{ text: m.content }],
-    }));
+let history = (conversationHistory || [])
+  .slice(-10)
+  .filter(
+    (m) =>
+      m.content &&
+      (m.role === 'user' || m.role === 'assistant')
+  )
+  .map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
 
-    const chat = model.startChat({ history });
-    const result = await chat.sendMessage(message.trim());
-    const response = result.response.text();
+// Gemini exige que le premier message soit toujours "user"
+while (history.length > 0 && history[0].role !== 'user') {
+  history.shift();
+}
+
+const chat = model.startChat({ history });
+
+const result = await chat.sendMessage(message.trim());
+
+const response = result.response.text();
 
     await db.collection('companies').doc(companyId).collection('ia_logs').add({
       uid,
