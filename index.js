@@ -4,7 +4,7 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 initializeApp();
 const db = getFirestore();
@@ -12,6 +12,172 @@ const db = getFirestore();
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MAX_MESSAGES_PER_DAY = 20;
 const CREATOR_EMAIL = 'gohiermikael95@gmail.com';
+
+function normalizeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+function normalizeRole(role) {
+  return normalizeText(role).replace(/\s+/g, '');
+}
+
+function canRoleEditPlanning(role, isCreator = false) {
+  if (isCreator === true) return true;
+  const r = normalizeRole(role);
+  return (
+    r === 'gerant' ||
+    r === 'gérant' ||
+    r === 'rh' ||
+    r === 'ressourceshumaines' ||
+    r === 'responsablerh' ||
+    r === 'adminrh'
+  );
+}
+
+function isPlanningModificationRequest(message) {
+  const m = normalizeText(message);
+  return (
+    (m.includes('ajoute') || m.includes('ajouter') || m.includes('mets') || m.includes('mettre') || m.includes('programme') || m.includes('planifie')) &&
+    (m.includes('planning') || m.includes('teletravail') || m.includes('chantier') || m.includes('bureau') || m.includes('horaire') || m.includes('jeudi') || m.includes('lundi') || m.includes('mardi') || m.includes('mercredi') || m.includes('vendredi') || m.includes('samedi') || m.includes('dimanche'))
+  );
+}
+
+function isConfirmationMessage(message) {
+  const m = normalizeText(message);
+  return ['oui', 'ok', 'confirme', 'je confirme', 'valide', 'vas y', 'vasi', 'go'].includes(m);
+}
+
+function extractPendingPlanningAction(history = []) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const content = String(history[i]?.content || '');
+    const match = content.match(/ACTION_PLANNING_JSON:({[\s\S]*?})\s*$/);
+    if (match) {
+      try {
+        return JSON.parse(match[1]);
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function parsePlanningAction(message) {
+  const original = String(message || '').trim();
+  const m = normalizeText(original);
+
+  const timeMatch = original.match(/(\d{1,2})\s*h\s*(\d{0,2})\s*(?:a|à|-)\s*(\d{1,2})\s*h\s*(\d{0,2})/i);
+  const startTime = timeMatch
+    ? `${timeMatch[1].padStart(2, '0')}:${(timeMatch[2] || '00').padStart(2, '0')}`
+    : '08:00';
+  const endTime = timeMatch
+    ? `${timeMatch[3].padStart(2, '0')}:${(timeMatch[4] || '00').padStart(2, '0')}`
+    : '16:00';
+
+  let dayOfWeek = null;
+  const days = [
+    ['lundi', 1],
+    ['mardi', 2],
+    ['mercredi', 3],
+    ['jeudi', 4],
+    ['vendredi', 5],
+    ['samedi', 6],
+    ['dimanche', 0],
+  ];
+  for (const [label, value] of days) {
+    if (m.includes(label)) dayOfWeek = value;
+  }
+
+  let locationName = 'Non précisé';
+  let locationType = 'site';
+  if (m.includes('teletravail')) {
+    locationName = 'Télétravail';
+    locationType = 'remote';
+  } else {
+    const chantierMatch = original.match(/(?:chantier|sur)\s+([A-Za-zÀ-ÿ0-9' -]{2,40})/i);
+    if (chantierMatch) locationName = chantierMatch[1].trim();
+  }
+
+  let employeeName = 'Membre à préciser';
+  const nameMatch = original.match(/(?:ajoute|ajouter|mets|mettre|programme|planifie)\s+([A-Za-zÀ-ÿ' -]{2,60}?)(?:\s+sur\s+le\s+planning|\s+tous|\s+ce\s+mois|\s+en\s+|\s+de\s+\d|$)/i);
+  if (nameMatch) employeeName = nameMatch[1].trim();
+
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const dates = [];
+
+  if (dayOfWeek !== null && (m.includes('ce mois') || m.includes('tous les') || m.includes('tout les'))) {
+    const d = new Date(year, month, 1);
+    while (d.getMonth() === month) {
+      if (d.getDay() === dayOfWeek) dates.push(d.toISOString().slice(0, 10));
+      d.setDate(d.getDate() + 1);
+    }
+  } else {
+    dates.push(now.toISOString().slice(0, 10));
+  }
+
+  return {
+    type: 'planning_add',
+    rawMessage: original,
+    employeeName,
+    locationName,
+    locationType,
+    startTime,
+    endTime,
+    dates,
+    createdFrom: 'ia',
+  };
+}
+
+function buildPlanningConfirmation(action) {
+  const datesText = action.dates.length > 1
+    ? `${action.dates.length} jour(s) : ${action.dates.join(', ')}`
+    : action.dates[0];
+
+  return `✅ J'ai préparé la modification du planning.\n\n` +
+    `Personne : ${action.employeeName}\n` +
+    `Lieu : ${action.locationName}\n` +
+    `Horaire : ${action.startTime} - ${action.endTime}\n` +
+    `Date(s) : ${datesText}\n\n` +
+    `Confirmez-vous l'ajout dans le planning ? Répondez simplement : OUI\n\n` +
+    `ACTION_PLANNING_JSON:${JSON.stringify(action)}`;
+}
+
+async function createPlanningEntries({ companyId, uid, action }) {
+  const batch = db.batch();
+  const col = db.collection('companies').doc(companyId).collection('planning');
+  const now = FieldValue.serverTimestamp();
+
+  for (const date of action.dates) {
+    const ref = col.doc();
+    batch.set(ref, {
+      type: 'work',
+      status: 'planned',
+      source: 'ia',
+      title: `${action.employeeName} - ${action.locationName}`,
+      userName: action.employeeName,
+      employeeName: action.employeeName,
+      locationName: action.locationName,
+      siteName: action.locationName,
+      locationType: action.locationType,
+      date,
+      startTime: action.startTime,
+      endTime: action.endTime,
+      createdBy: uid,
+      createdAt: now,
+      updatedAt: now,
+      rawAiRequest: action.rawMessage,
+    });
+  }
+
+  await batch.commit();
+  return action.dates.length;
+}
 
 async function verifyIaAccess(uid, companyId, isCreator = false) {
   const userSnap = await db.collection('users').doc(uid).get();
@@ -120,9 +286,7 @@ async function buildCompanyContext(uid, companyId, company) {
     teamLines = teamSnap.docs
       .map((d) => {
         const m = d.data();
-        return `- ${m.name || 'Membre'} | rôle: ${m.role || '?'} | statut: ${
-          m.status || '?'
-        } | métier: ${m.job || '?'}`;
+        return `- ${m.name || 'Membre'} | rôle: ${m.role || '?'} | statut: ${m.status || '?'} | métier: ${m.job || '?'}`;
       })
       .join('\n');
   } catch (_) {
@@ -141,9 +305,7 @@ async function buildCompanyContext(uid, companyId, company) {
 
     const pts = ptSnap.docs.map((d) => {
       const p = d.data();
-      return `- ${p.userName || '?'} | arrivée: ${p.arrival || '—'} | départ: ${
-        p.departure || 'en cours'
-      } | statut: ${p.status || '?'}`;
+      return `- ${p.userName || '?'} | arrivée: ${p.arrival || '—'} | départ: ${p.departure || 'en cours'} | statut: ${p.status || '?'}`;
     });
 
     pointageLines = pts.length > 0 ? pts.join('\n') : "Aucun pointage aujourd'hui.";
@@ -164,9 +326,7 @@ async function buildCompanyContext(uid, companyId, company) {
 
     const abs = absSnap.docs.map((d) => {
       const a = d.data();
-      return `- ${a.userName || '?'} | du ${a.startDate || '?'} au ${
-        a.endDate || '?'
-      } | motif: ${a.type || '?'}`;
+      return `- ${a.userName || '?'} | du ${a.startDate || '?'} au ${a.endDate || '?'} | motif: ${a.type || '?'}`;
     });
 
     absenceLines = abs.length > 0 ? abs.join('\n') : 'Aucune absence en cours.';
@@ -213,7 +373,7 @@ ${absenceLines}
 ${siteLines}`;
 }
 
-function buildSystemPrompt(sector, companyContext) {
+function buildSystemPrompt(sector, companyContext, canEditPlanning, userRole) {
   const sectorVocab = {
     btp: 'chantiers, ouvriers, sous-traitants, coulages, réserves',
     securite: 'sites surveillés, agents, rondes, incidents',
@@ -231,9 +391,20 @@ function buildSystemPrompt(sector, companyContext) {
   return `Tu es l'assistant IA intégré à OORVYA pour cette entreprise.
 Tu parles UNIQUEMENT en français sauf si l'utilisateur utilise une autre langue.
 Secteur : ${sector || 'général'} — vocabulaire : ${vocab}
-RÈGLES : Ne révèle jamais les données d'autres entreprises. Ne divulgue pas ta clé API. Ne modifie jamais les données.
+Rôle utilisateur : ${userRole || 'non précisé'}
+Autorisation modification planning : ${canEditPlanning ? 'OUI' : 'NON'}
+
+RÈGLES DE SÉCURITÉ :
+- Ne révèle jamais les données d'autres entreprises.
+- Ne divulgue jamais ta clé API.
+- Seuls le gérant, les RH et le créateur peuvent modifier le planning.
+- Les autres rôles peuvent consulter et demander des résumés, mais ne peuvent pas modifier les données.
+- Pour les modifications de planning, prépare toujours clairement l'action avant confirmation.
+- L'écriture réelle dans Firestore est gérée par OORVYA après confirmation.
+
 CONTEXTE EN TEMPS RÉEL :
 ${companyContext}
+
 Réponds de façon claire, structurée et utile.`;
 }
 
@@ -262,10 +433,46 @@ app.post('/askIA', async (req, res) => {
 
     const creatorMode = isCreator === true;
 
-    const { company, plan } = await verifyIaAccess(uid, companyId, creatorMode);
+    const { user, company, plan } = await verifyIaAccess(uid, companyId, creatorMode);
     const quota = await checkAndIncrementQuota(uid, companyId, creatorMode);
+    const userRole = user?.role || (creatorMode ? 'creator' : '');
+    const canEditPlanning = canRoleEditPlanning(userRole, creatorMode);
+
+    if (isConfirmationMessage(message)) {
+      const pendingAction = extractPendingPlanningAction(conversationHistory || []);
+      if (pendingAction && pendingAction.type === 'planning_add') {
+        if (!canEditPlanning) {
+          return res.json({
+            response: "⛔ Vous n'avez pas l'autorisation de modifier le planning. Cette action est réservée au gérant, aux RH et au créateur.",
+            quota,
+          });
+        }
+
+        const createdCount = await createPlanningEntries({ companyId, uid, action: pendingAction });
+        return res.json({
+          response: `✅ C'est fait. J'ai ajouté ${createdCount} entrée(s) dans le planning pour ${pendingAction.employeeName}.`,
+          quota,
+        });
+      }
+    }
+
+    if (isPlanningModificationRequest(message)) {
+      if (!canEditPlanning) {
+        return res.json({
+          response: "⛔ La modification du planning est réservée au gérant, aux RH et au créateur. Je peux vous aider à consulter le planning, mais je ne peux pas le modifier avec votre rôle actuel.",
+          quota,
+        });
+      }
+
+      const action = parsePlanningAction(message);
+      return res.json({
+        response: buildPlanningConfirmation(action),
+        quota,
+      });
+    }
+
     const companyContext = await buildCompanyContext(uid, companyId, company);
-    const systemPrompt = buildSystemPrompt(company.sector, companyContext);
+    const systemPrompt = buildSystemPrompt(company.sector, companyContext, canEditPlanning, userRole);
 
     if (!GEMINI_API_KEY) {
       throw { code: 500, message: 'Clé Gemini manquante côté serveur.' };
@@ -282,55 +489,44 @@ app.post('/askIA', async (req, res) => {
       },
     });
 
-let history = (conversationHistory || [])
-  .slice(-10)
-  .filter(
-    (m) =>
-      m.content &&
-      (m.role === 'user' || m.role === 'assistant')
-  )
-  .map((m) => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }],
-  }));
+    let history = (conversationHistory || [])
+      .slice(-10)
+      .filter((m) => m.content && (m.role === 'user' || m.role === 'assistant'))
+      .map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      }));
 
-// Gemini exige que le premier message soit toujours "user"
-while (history.length > 0 && history[0].role !== 'user') {
-  history.shift();
-}
+    while (history.length > 0 && history[0].role !== 'user') {
+      history.shift();
+    }
 
-const chat = model.startChat({ history });
+    const chat = model.startChat({ history });
 
-let response;
+    let response;
 
-try {
-  const result = await chat.sendMessage(message.trim());
+    try {
+      const result = await chat.sendMessage(message.trim());
+      response = result.response.text();
+    } catch (e) {
+      console.error('Erreur Gemini :', e);
 
-  response = result.response.text();
+      if (String(e).includes('503')) {
+        return res.json({
+          response: "⚠️ L'assistant IA OORVYA est momentanément très sollicité. Veuillez réessayer dans quelques secondes.",
+          quota,
+        });
+      }
 
-} catch (e) {
-  console.error("Erreur Gemini :", e);
+      if (String(e).includes('429')) {
+        return res.json({
+          response: "⚠️ Le quota gratuit de l'assistant IA a été atteint temporairement. Veuillez réessayer plus tard.",
+          quota,
+        });
+      }
 
-  // Gemini saturé (503)
-  if (String(e).includes("503")) {
-    return res.json({
-      response:
-        "⚠️ L'assistant IA OORVYA est momentanément très sollicité. Veuillez réessayer dans quelques secondes.",
-      quota,
-    });
-  }
-
-  // Limite gratuite Gemini atteinte (429)
-  if (String(e).includes("429")) {
-    return res.json({
-      response:
-        "⚠️ Le quota gratuit de l'assistant IA a été atteint temporairement. Veuillez réessayer plus tard.",
-      quota,
-    });
-  }
-
-  throw e;
-}
+      throw e;
+    }
 
     await db.collection('companies').doc(companyId).collection('ia_logs').add({
       uid,
@@ -369,10 +565,10 @@ app.post('/toggleIaAccess', async (req, res) => {
       return res.status(403).json({ error: 'Accès refusé.' });
     }
 
-    const role = (manager.role || '').toLowerCase();
-    if (role !== 'gerant' && role !== 'creator') {
+    const role = normalizeRole(manager.role);
+    if (role !== 'gerant' && role !== 'rh' && role !== 'creator') {
       return res.status(403).json({
-        error: "Seul le gérant peut gérer l'accès IA.",
+        error: "Seul le gérant, les RH ou le créateur peuvent gérer l'accès IA.",
       });
     }
 
