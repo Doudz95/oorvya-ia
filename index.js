@@ -301,9 +301,36 @@ while (history.length > 0 && history[0].role !== 'user') {
 
 const chat = model.startChat({ history });
 
-const result = await chat.sendMessage(message.trim());
+let response;
 
-const response = result.response.text();
+try {
+  const result = await chat.sendMessage(message.trim());
+
+  response = result.response.text();
+
+} catch (e) {
+  console.error("Erreur Gemini :", e);
+
+  // Gemini saturé (503)
+  if (String(e).includes("503")) {
+    return res.json({
+      response:
+        "⚠️ L'assistant IA OORVYA est momentanément très sollicité. Veuillez réessayer dans quelques secondes.",
+      quota,
+    });
+  }
+
+  // Limite gratuite Gemini atteinte (429)
+  if (String(e).includes("429")) {
+    return res.json({
+      response:
+        "⚠️ Le quota gratuit de l'assistant IA a été atteint temporairement. Veuillez réessayer plus tard.",
+      quota,
+    });
+  }
+
+  throw e;
+}
 
     await db.collection('companies').doc(companyId).collection('ia_logs').add({
       uid,
