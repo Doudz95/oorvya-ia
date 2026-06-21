@@ -120,17 +120,29 @@ function parsePlanningAction(message) {
   const nm = original.match(/(?:ajoute|ajouter|mets|mettre|programme|planifie|affecte|assigne)\s+([A-Za-zÀ-ÿ'' -]{2,80}?)(?:\s+sur\s+le\s+planning|\s+tous|\s+tout|\s+ce\s+mois|\s+en\s+|\s+au\s+|\s+a\s+|\s+à\s+|\s+de\s+\d|$)/i);
   if (nm) employeeName = nm[1].trim();
 
-  const now = new Date();
-  const dates = [];
-  if (dayOfWeek !== null && (m.includes('ce mois') || m.includes('tous les') || m.includes('tout les'))) {
-    const d = new Date(now.getFullYear(), now.getMonth(), 1);
-    while (d.getMonth() === now.getMonth()) {
-      if (d.getDay() === dayOfWeek) dates.push(d.toISOString().slice(0, 10));
-      d.setDate(d.getDate() + 1);
-    }
-  } else {
-    dates.push(now.toISOString().slice(0, 10));
+const now = new Date();
+const dates = [];
+
+// Cherche un numéro de jour précis ex: "le 25", "jeudi 25"
+const dayNumberMatch = original.match(/\b(\d{1,2})\b/);
+const specificDay = dayNumberMatch ? parseInt(dayNumberMatch[1]) : null;
+
+if (dayOfWeek !== null && (m.includes('ce mois') || m.includes('tous les') || m.includes('tout les'))) {
+  const d = new Date(now.getFullYear(), now.getMonth(), 1);
+  while (d.getMonth() === now.getMonth()) {
+    if (d.getDay() === dayOfWeek) dates.push(d.toISOString().slice(0, 10));
+    d.setDate(d.getDate() + 1);
   }
+} else if (specificDay && specificDay >= 1 && specificDay <= 31) {
+  // Date précise ce mois-ci (ou mois prochain si déjà passé)
+  let target = new Date(now.getFullYear(), now.getMonth(), specificDay);
+  if (target < now) {
+    target = new Date(now.getFullYear(), now.getMonth() + 1, specificDay);
+  }
+  dates.push(target.toISOString().slice(0, 10));
+} else {
+  dates.push(now.toISOString().slice(0, 10));
+}
 
   return {
     type: 'planning_add',
