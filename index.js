@@ -325,11 +325,42 @@ async function createPlanningEntries({ companyId, uid, action }) {
   const now = FieldValue.serverTimestamp();
 
   for (const date of action.dates) {
+    // Construire les vrais Timestamps Flutter attend dateTime + endDateTime
+    const [startH, startM] = action.startTime.split(':').map(Number);
+    const [endH, endM] = action.endTime.split(':').map(Number);
+    const [year, month, day] = date.split('-').map(Number);
+
+    const startDate = new Date(year, month - 1, day, startH, startM, 0);
+    let endDate = new Date(year, month - 1, day, endH, endM, 0);
+    if (endDate <= startDate) endDate = new Date(endDate.getTime() + 24 * 60 * 60 * 1000);
+
+    const { Timestamp } = require('firebase-admin/firestore');
+    const startTimestamp = Timestamp.fromDate(startDate);
+    const endTimestamp = Timestamp.fromDate(endDate);
+
+    const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+    const dayKeyStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
     batch.set(col.doc(), {
-      type: 'work',
-      status: 'planned',
-      source: 'ia',
+      // Champs lus par Flutter
       title: `${action.employeeName} - ${action.locationName}`,
+      assignedTo: action.employeeName,
+      location: action.locationName,
+      siteName: action.locationName,
+      status: 'Prévu',
+      shiftType: 'Journée',
+      targetMode: 'Personne',
+      planningScope: action.locationType === 'remote' ? 'Télétravail' : action.locationType === 'office' ? 'Bureau' : 'Terrain',
+      dateTime: startTimestamp,
+      endDateTime: endTimestamp,
+      dayKey: dayKeyStr,
+      monthKey,
+      // Champs IA additionnels
+      type: 'work',
+      source: 'ia',
+      date,
+      startTime: action.startTime,
+      endTime: action.endTime,
       userId: action.employeeUid,
       uid: action.employeeUid,
       employeeUid: action.employeeUid,
@@ -339,11 +370,7 @@ async function createPlanningEntries({ companyId, uid, action }) {
       employeeRole: action.employeeRole || '',
       employeeJob: action.employeeJob || '',
       locationName: action.locationName,
-      siteName: action.locationName,
       locationType: action.locationType,
-      date,
-      startTime: action.startTime,
-      endTime: action.endTime,
       createdBy: uid,
       createdAt: now,
       updatedAt: now,
