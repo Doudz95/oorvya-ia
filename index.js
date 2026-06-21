@@ -82,6 +82,7 @@ function parsePlanningAction(message) {
   const original = String(message || '').trim();
   const m = normalizeText(original);
 
+  // ── 1. HORAIRES ──────────────────────────────────────────────────────────────
   const timeMatch = original.match(/(\d{1,2})\s*h\s*(\d{0,2})\s*(?:a|à|-)\s*(\d{1,2})\s*h\s*(\d{0,2})/i);
   const startTime = timeMatch
     ? `${timeMatch[1].padStart(2, '0')}:${(timeMatch[2] || '00').padStart(2, '0')}`
@@ -90,19 +91,22 @@ function parsePlanningAction(message) {
     ? `${timeMatch[3].padStart(2, '0')}:${(timeMatch[4] || '00').padStart(2, '0')}`
     : '16:00';
 
+  // ── 2. JOUR DE LA SEMAINE ────────────────────────────────────────────────────
+  const JOURS = [
+    ['dimanche', 0], ['lundi', 1], ['mardi', 2], ['mercredi', 3],
+    ['jeudi', 4], ['vendredi', 5], ['samedi', 6],
+  ];
   let dayOfWeek = null;
-  for (const [label, value] of [
-    ['lundi', 1],
-    ['mardi', 2],
-    ['mercredi', 3],
-    ['jeudi', 4],
-    ['vendredi', 5],
-    ['samedi', 6],
-    ['dimanche', 0],
-  ]) {
-    if (m.includes(label)) dayOfWeek = value;
+  for (const [label, value] of JOURS) {
+    if (m.includes(label)) { dayOfWeek = value; break; }
   }
 
+  // ── 3. NUMÉRO DE JOUR PRÉCIS (ex: "le 25", "mardi 25") ──────────────────────
+  // On cherche un nombre entre 1 et 31 qui N'EST PAS une heure (pas suivi de "h")
+  const dayNumMatch = original.match(/\b([0-9]{1,2})\b(?!\s*h)/i);
+  const specificDayNum = dayNumMatch ? parseInt(dayNumMatch[1]) : null;
+
+  // ── 4. LIEU ──────────────────────────────────────────────────────────────────
   let locationName = 'Non précisé';
   let locationType = 'site';
   if (m.includes('teletravail')) {
@@ -112,37 +116,54 @@ function parsePlanningAction(message) {
     locationName = 'Bureau';
     locationType = 'office';
   } else {
-    const cm = original.match(/(?:chantier|site|sur)\s+([A-Za-zÀ-ÿ0-9'' -]{2,60})/i);
+    // Cherche "chantier X", "site X", "sur X"
+    const cm = original.match(/(?:chantier|site|sur)\s+([A-Za-zÀ-ÿ0-9''\- ]{2,50}?)(?:\s+le\s+|\s+lundi|\s+mardi|\s+mercredi|\s+jeudi|\s+vendredi|\s+samedi|\s+dimanche|\s+de\s+\d|$)/i);
     if (cm) locationName = cm[1].trim();
   }
 
+  // ── 5. NOM EMPLOYÉ ───────────────────────────────────────────────────────────
+  // Extrait le prénom/nom juste après le verbe d'action, avant les mots-clés de lieu/temps
   let employeeName = 'Membre à préciser';
-  const nm = original.match(/(?:ajoute|ajouter|mets|mettre|programme|planifie|affecte|assigne)\s+([A-Za-zÀ-ÿ'' -]{2,80}?)(?:\s+sur\s+le\s+planning|\s+tous|\s+tout|\s+ce\s+mois|\s+en\s+|\s+au\s+|\s+a\s+|\s+à\s+|\s+de\s+\d|$)/i);
+  const nm = original.match(
+    /(?:ajoute|ajouter|mets|mettre|programme|planifie|affecte|assigne)\s+([A-Za-zÀ-ÿ''\- ]{2,50}?)(?:\s+(?:sur|au|en|le|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|chantier|site|bureau|teletravail|télétravail|tous|tout|ce\s+mois|\d))/i
+  );
   if (nm) employeeName = nm[1].trim();
 
-const now = new Date();
-const dates = [];
+  // ── 6. CALCUL DES DATES ──────────────────────────────────────────────────────
+  const now = new Date();
+  const dates = [];
 
-// Cherche un numéro de jour précis ex: "le 25", "jeudi 25"
-const dayNumberMatch = original.match(/\b(\d{1,2})\b/);
-const specificDay = dayNumberMatch ? parseInt(dayNumberMatch[1]) : null;
+  const isRecurring = m.includes('tous les') || m.includes('tout les') || m.includes('toutes les') || m.includes('ce mois');
 
-if (dayOfWeek !== null && (m.includes('ce mois') || m.includes('tous les') || m.includes('tout les'))) {
-  const d = new Date(now.getFullYear(), now.getMonth(), 1);
-  while (d.getMonth() === now.getMonth()) {
-    if (d.getDay() === dayOfWeek) dates.push(d.toISOString().slice(0, 10));
-    d.setDate(d.getDate() + 1);
+  if (isRecurring && dayOfWeek !== null) {
+    // Ex: "tous les lundis de juin" → toutes les occurrences du mois en cours
+    const d = new Date(now.getFullYear(), now.getMonth(), 1);
+    while (d.getMonth() === now.getMonth()) {
+      if (d.getDay() === dayOfWeek) {
+        dates.push(new Date(d).toISOString().slice(0, 10));
+      }
+      d.setDate(d.getDate() + 1);
+    }
+  } else if (specificDayNum && specificDayNum >= 1 && specificDayNum <= 31) {
+    // Ex: "le mardi 25" ou "le 25" → date précise
+    let target = new Date(now.getFullYear(), now.getMonth(), specificDayNum);
+    // Si la date est déjà passée ce mois-ci, on prend le mois prochain
+    if (target < new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
+      target = new Date(now.getFullYear(), now.getMonth() + 1, specificDayNum);
+    }
+    dates.push(target.toISOString().slice(0, 10));
+  } else if (dayOfWeek !== null) {
+    // Ex: "lundi prochain" → prochain lundi à venir
+    const today = now.getDay();
+    let diff = dayOfWeek - today;
+    if (diff <= 0) diff += 7;
+    const next = new Date(now);
+    next.setDate(now.getDate() + diff);
+    dates.push(next.toISOString().slice(0, 10));
+  } else {
+    // Aucune date trouvée → aujourd'hui par défaut
+    dates.push(now.toISOString().slice(0, 10));
   }
-} else if (specificDay && specificDay >= 1 && specificDay <= 31) {
-  // Date précise ce mois-ci (ou mois prochain si déjà passé)
-  let target = new Date(now.getFullYear(), now.getMonth(), specificDay);
-  if (target < now) {
-    target = new Date(now.getFullYear(), now.getMonth() + 1, specificDay);
-  }
-  dates.push(target.toISOString().slice(0, 10));
-} else {
-  dates.push(now.toISOString().slice(0, 10));
-}
 
   return {
     type: 'planning_add',
