@@ -83,12 +83,12 @@ async function parseNewsAction(message, sector, callGemini) {
   let title = 'Actualité entreprise';
   let msgContent = original;
   try {
-    const prompt = `Tu es un assistant RH pour une entreprise du secteur "${sector || 'général'}".
-L'utilisateur veut publier cette annonce interne : "${original}"
-Reformule-la de façon professionnelle, bienveillante et claire pour tous les employés.
-Réponds UNIQUEMENT dans ce format (sans rien d'autre) :
-TITRE: [titre court et accrocheur]
-MESSAGE: [message complet bien rédigé]`;
+    const prompt = `Tu es assistant RH pour une entreprise secteur "${sector || 'général'}".
+Rédige une annonce interne professionnelle et chaleureuse basée sur cette idée : "${original}"
+Ignore les mots comme "publie", "annonce", "dis à tout le monde" — concentre-toi uniquement sur le contenu.
+Réponds UNIQUEMENT dans ce format :
+TITRE: [titre court accrocheur]
+MESSAGE: [message bien rédigé, 2-3 phrases maximum]`;
     const result = await callGemini('Tu es un assistant RH professionnel.', prompt, []);
     const titreMatch = result.match(/TITRE:\s*(.+)/i);
     const msgMatch   = result.match(/MESSAGE:\s*([\s\S]+)/i);
