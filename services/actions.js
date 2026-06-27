@@ -18,7 +18,7 @@ function detectIntent(message) {
        m.includes('boutique') || m.includes('etablissement') || m.includes('intervention')))
     return 'site_create';
   if ((m.includes('publie') || m.includes('publier') || m.includes('poste') || m.includes('ecris') ||
-       m.includes('annonce') || m.includes('dis a') || m.includes('previens') || m.includes('informe')) &&
+       m.includes('annonce') || m.includes('dis a') || m.includes('previens') || m.includes('informe') || m.includes('dire')) &&
       (m.includes('actualite') || m.includes('annonce') || m.includes('information') || m.includes('news') ||
        m.includes('equipe') || m.includes('tout le monde') || m.includes('employe') || m.includes('personnel')))
     return 'news_publish';
@@ -78,28 +78,32 @@ function parseSiteAction(message, sector) {
   };
 }
 
-async function parseNewsAction(message, sector, callGemini) {
+// ─── parseNewsAction SANS appel Gemini supplémentaire ─────────────────────────
+// La reformulation se fait via le system prompt Gemini principal (1 seul appel)
+function parseNewsAction(message) {
   const original = String(message || '').trim();
-  let title = 'Actualité entreprise';
-  let msgContent = original;
-  try {
-    const prompt = `Tu es assistant RH pour une entreprise secteur "${sector || 'général'}".
-Rédige une annonce interne professionnelle et chaleureuse basée sur cette idée : "${original}"
-Ignore les mots comme "publie", "annonce", "dis à tout le monde" — concentre-toi uniquement sur le contenu.
-Réponds UNIQUEMENT dans ce format :
-TITRE: [titre court accrocheur]
-MESSAGE: [message bien rédigé, 2-3 phrases maximum]`;
-    const result = await callGemini('Tu es un assistant RH professionnel.', prompt, []);
-    const titreMatch = result.match(/TITRE:\s*(.+)/i);
-    const msgMatch   = result.match(/MESSAGE:\s*([\s\S]+)/i);
-    if (titreMatch) title      = titreMatch[1].trim();
-    if (msgMatch)   msgContent = msgMatch[1].trim();
-  } catch (_) {
-    const clean = original.replace(/^(?:publie|annonce|dis a tout le monde|previens|informe)\s+/i, '');
-    title = clean.length < 60 ? clean : clean.substring(0, 57) + '...';
-    msgContent = clean;
-  }
-  return { type: 'news_publish', title, message: msgContent, rawMessage: original, createdFrom: 'ia' };
+
+  // Nettoyage intelligent du texte brut
+  const clean = original
+    .replace(/^(?:tu peux |peux-tu |peut-tu |s'?il te pla[iî]t |stp |svp )?/i, '')
+    .replace(/^(?:faire |publier |poster |dire |mettre |ecrire |rédiger )?/i, '')
+    .replace(/^(?:une |un )?(?:annonce |actualité |actualite |message |news |communication )?/i, '')
+    .replace(/^(?:en disant |pour dire |qui dit |que |: ?)/i, '')
+    .trim();
+
+  // Titre = première phrase ou 60 premiers caractères
+  const firstSentence = clean.split(/[.!?]/)[0].trim();
+  const title = firstSentence.length > 5 && firstSentence.length < 80
+    ? firstSentence
+    : clean.length < 60 ? clean : clean.substring(0, 57) + '...';
+
+  return {
+    type: 'news_publish',
+    title,
+    message: clean,
+    rawMessage: original,
+    createdFrom: 'ia',
+  };
 }
 
 function parseEmployeeUpdate(message) {
