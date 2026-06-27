@@ -111,7 +111,7 @@ app.post('/askIA', async (req, res) => {
     // ── ACTUALITÉ ─────────────────────────────────────────────────────────────
     if (intent === 'news_publish') {
       if (!canManage) return res.json({ response: "⛔ La publication d'actualités est réservée au gérant.", quota });
-      const action = parseNewsAction(message);
+      const action = await parseNewsAction(message, company.sector, callGemini);
       const response = buildConfirmationMessage(action);
       await saveToHistory(companyId, uid, 'assistant', response, isPriv);
       return res.json({ response, quota });
