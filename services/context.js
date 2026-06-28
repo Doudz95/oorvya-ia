@@ -13,7 +13,8 @@ async function buildCompanyContext(uid, companyId, company) {
   const [teamLines, pointageLines, absenceLines, siteLines, planningLines, newsLines] = await Promise.all([
     safe(async () => {
       const s = await db.collection('companies').doc(companyId).collection('teams').limit(60).get();
-      return s.docs.map(d => { const m = d.data(); return `- ${m.name || m.fullName || '?'} | uid:${m.uid || d.id} | rôle:${m.role || '?'} | statut:${m.status || '?'} | métier:${m.job || m.metier || '?'}`; }).join('\n') || 'Aucun membre.';
+    const filtered = s.docs.filter(d => d.data().excluded !== true && d.data().archived !== true && d.data().deleted !== true);
+      return filtered.map(d => { const m = d.data(); return `- ${m.name || m.fullName || '?'} | uid:${m.uid || d.id} | rôle:${m.role || '?'} | statut:${m.status || '?'} | métier:${m.job || m.metier || '?'}`; }).join('\n') || 'Aucun membre.';
     }),
     safe(async () => {
       const s = await db.collection('companies').doc(companyId).collection('pointages').where('date', '==', today).limit(60).get();
