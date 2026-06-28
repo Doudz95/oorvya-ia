@@ -39,7 +39,6 @@ app.post('/askIA', async (req, res) => {
     const userName   = user?.name || user?.displayName || 'Utilisateur';
     const isPriv     = creatorMode || isOwner;
 
-    // Sauvegarder le message utilisateur
     await saveToHistory(companyId, uid, 'user', message, isPriv);
 
     const intent = detectIntent(message);
@@ -58,11 +57,11 @@ app.post('/askIA', async (req, res) => {
           if (!resolved.ok) {
             response = `⚠️ ${resolved.reason}${resolved.suggestions?.length ? '\n\nEmployés : ' + resolved.suggestions.join(', ') : ''}`;
           } else {
-            pending.employeeUid  = resolved.employee.uid;
+            pending.employeeUid   = resolved.employee.uid;
             pending.employeeDocId = resolved.employee.docId;
-            pending.employeeRole = resolved.employee.role || '';
-            pending.employeeJob  = resolved.employee.job  || '';
-            pending.employeeName = resolved.employee.name;
+            pending.employeeRole  = resolved.employee.role || '';
+            pending.employeeJob   = resolved.employee.job  || '';
+            pending.employeeName  = resolved.employee.name;
             const count = await executePlanningAdd(companyId, uid, pending);
             response = `✅ Planning mis à jour ! ${count} entrée(s) ajoutée(s) pour ${pending.employeeName}.`;
           }
@@ -108,10 +107,38 @@ app.post('/askIA', async (req, res) => {
       return res.json({ response, quota });
     }
 
-    // ── ACTUALITÉ ─────────────────────────────────────────────────────────────
+    // ── ACTUALITÉ — reformulation via Groq ────────────────────────────────────
     if (intent === 'news_publish') {
       if (!canManage) return res.json({ response: "⛔ La publication d'actualités est réservée au gérant.", quota });
-      const action = parseNewsAction(message);
+
+      let title = '';
+      let msgContent = '';
+
+      try {
+        const reformulation = await callGemini(
+          `Tu es un assistant RH professionnel pour une entreprise du secteur "${company.sector || 'général'}".
+Reformule l'idée d'annonce suivante en une communication interne professionnelle, chaleureuse et bien rédigée.
+Ne répète jamais mot pour mot ce que l'utilisateur a écrit.
+Réponds UNIQUEMENT dans ce format exact, sans rien d'autre :
+TITRE: [titre court et accrocheur]
+MESSAGE: [message complet bien rédigé en 2-3 phrases]`,
+          message,
+          []
+        );
+        const titreMatch = reformulation.match(/TITRE:\s*(.+)/i);
+        const msgMatch   = reformulation.match(/MESSAGE:\s*([\s\S]+)/i);
+        if (titreMatch) title      = titreMatch[1].trim();
+        if (msgMatch)   msgContent = msgMatch[1].trim();
+      } catch(_) {}
+
+      // Fallback si Groq échoue
+      if (!title || !msgContent) {
+        const fallback = parseNewsAction(message);
+        title      = fallback.title;
+        msgContent = fallback.message;
+      }
+
+      const action = { type: 'news_publish', title, message: msgContent, rawMessage: message, createdFrom: 'ia' };
       const response = buildConfirmationMessage(action);
       await saveToHistory(companyId, uid, 'assistant', response, isPriv);
       return res.json({ response, quota });
@@ -133,14 +160,13 @@ app.post('/askIA', async (req, res) => {
       return res.json({ response, quota });
     }
 
-    // ── QUESTION GÉNÉRALE → GEMINI ────────────────────────────────────────────
+    // ── QUESTION GÉNÉRALE → GROQ ──────────────────────────────────────────────
     const [companyContext, todayHistory] = await Promise.all([
       buildCompanyContext(uid, companyId, company),
       loadTodayHistory(companyId, uid),
     ]);
     const systemPrompt = buildSystemPrompt(company.sector, companyContext, canEdit, userRole);
 
-    // Historique Firestore en priorité, sinon Flutter
     let history = todayHistory.length > 0
       ? todayHistory.slice(-20).map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }))
       : (conversationHistory || []).slice(-10)
@@ -153,7 +179,7 @@ app.post('/askIA', async (req, res) => {
     try {
       response = await callGemini(systemPrompt, message, history);
     } catch (e) {
-      console.error('Erreur Gemini:', e);
+      console.error('Erreur Groq:', e);
       response = "Je rencontre une petite difficulté technique. Votre demande est bien reçue — réessayez dans quelques secondes.";
     }
 
