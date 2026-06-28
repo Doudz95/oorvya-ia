@@ -14,7 +14,7 @@ const { detectIntent, extractPendingAction, buildConfirmationMessage, parseSiteA
 const { parsePlanningAction, preparePlanningAction, executePlanningAdd } = require('./services/planning');
 const { executeEmployeeUpdate, resolveEmployee } = require('./services/employee');
 const { buildCompanyContext, buildSystemPrompt, saveToHistory, loadTodayHistory } = require('./services/context');
-const { callGemini } = require('./services/gemini');
+const { callGemini } = require('./services/groq');
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 
