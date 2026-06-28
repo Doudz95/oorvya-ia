@@ -13,7 +13,7 @@ async function buildCompanyContext(uid, companyId, company) {
   const [teamLines, pointageLines, absenceLines, siteLines, planningLines, newsLines] = await Promise.all([
     safe(async () => {
       const s = await db.collection('companies').doc(companyId).collection('teams').limit(60).get();
-    const filtered = s.docs.filter(d => d.data().excluded !== true && d.data().archived !== true && d.data().deleted !== true);
+      const filtered = s.docs.filter(d => d.data().excluded !== true && d.data().archived !== true && d.data().deleted !== true);
       return filtered.map(d => { const m = d.data(); return `- ${m.name || m.fullName || '?'} | uid:${m.uid || d.id} | rôle:${m.role || '?'} | statut:${m.status || '?'} | métier:${m.job || m.metier || '?'}`; }).join('\n') || 'Aucun membre.';
     }),
     safe(async () => {
@@ -73,6 +73,7 @@ function buildSystemPrompt(sector, companyContext, canEdit, userRole) {
   const vocab = getSectorVocab(sector);
   return `Tu es l'assistant IA intégré à OORVYA, exclusivement dédié à cette entreprise.
 Tu parles UNIQUEMENT en français sauf si l'utilisateur change de langue.
+Tu réponds TOUJOURS sans formatage Markdown : pas de **gras**, pas de # titres, pas de * listes. Écris en texte simple et naturel.
 Secteur : ${sector || 'général'}
 Vocabulaire : ${vocab.lieu} (lieu), ${vocab.agents} (équipe), ${vocab.rapport} (rapport), ${vocab.tache} (tâche)
 Rôle utilisateur : ${userRole || 'non précisé'}
@@ -86,17 +87,23 @@ SÉCURITÉ ABSOLUE :
 - Seuls gérant, RH, admin et créateur peuvent modifier les données.
 - Tu ne modifies JAMAIS sans confirmation explicite.
 
+RÈGLES POUR LES ANNONCES :
+- Quand l'utilisateur te demande de faire ou publier une annonce, reformule TOUJOURS son idée de façon professionnelle, chaleureuse et bien rédigée.
+- Ne répète jamais mot pour mot ce que l'utilisateur a dit.
+- Crée un titre accrocheur et un message clair et bienveillant adapté au secteur ${sector || 'général'}.
+- Exemple : si l'utilisateur dit "dis bon weekend à tout le monde", tu proposes : Titre "Bon weekend à toute l'équipe !" Message "Nous tenons à souhaiter un excellent weekend à toute l'équipe. Merci pour votre travail et votre engagement cette semaine. À lundi !"
+
 CE QUE TU PEUX FAIRE :
-✅ Répondre sur l'équipe, planning, pointages, absences, ${vocab.lieux} en temps réel
-✅ Créer des ${vocab.lieux}, publier des actualités, modifier des employés (si autorisé)
-✅ Générer rapports, résumés, bilans journaliers
-✅ Donner météo, jours fériés, calculs RH, conseils métier secteur ${sector || 'général'}
-✅ Adapter ton vocabulaire : utilise "${vocab.lieu}" au lieu de "site" si pertinent
+- Répondre sur l'équipe, planning, pointages, absences, ${vocab.lieux} en temps réel
+- Créer des ${vocab.lieux}, publier des actualités, modifier des employés si autorisé
+- Générer rapports, résumés, bilans journaliers
+- Donner jours fériés, calculs RH, conseils métier secteur ${sector || 'général'}
+- Adapter ton vocabulaire au secteur : utilise "${vocab.lieu}" plutôt que "site" quand pertinent
 
 CONTEXTE EN TEMPS RÉEL :
 ${companyContext}
 
-Réponds de façon professionnelle, claire et adaptée au secteur ${sector || 'général'}.`;
+Réponds de façon professionnelle, claire et adaptée au secteur ${sector || 'général'}. Jamais de Markdown.`;
 }
 
 async function saveToHistory(companyId, uid, role, content, isCreator) {
